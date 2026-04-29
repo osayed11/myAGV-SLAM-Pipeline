@@ -1,0 +1,72 @@
+# ============================================================
+# SLAM Pipeline Configuration
+# ============================================================
+
+# --- Bag file ---
+bag_file: "robot_data/agv1_square_manual_20260429_224111.bag"   # path relative to SLAM/ dir
+mocap_bag_file: "gt_data/20260429_lab_loop_r01_run02/raw/mocap.bag"
+
+# --- ROS Topics ---
+topics:
+  rgb: "/camera/color/image_raw"
+  depth: "/camera/aligned_depth_to_color/image_raw"
+  camera_info: "/camera/color/camera_info"
+  depth_info: "/camera/aligned_depth_to_color/camera_info"
+  lidar: "/scan"
+  odom: "/odom"
+  imu: "/camera/imu"
+  mocap: "/gt/robot_01/pose"
+  tf: "/tf"
+  tf_static: "/tf_static"
+
+# --- Extraction ---
+extraction:
+  output_dir: "robot_data/extracted_data"
+  max_time_diff_s: 0.05          # max RGB-depth timestamp mismatch (50ms)
+  skip_frames: 1                 # extract every Nth frame (1 = all)
+  image_format: "png"            # png or jpg
+
+# --- Camera (D455 defaults, overridden by camera_info) ---
+camera:
+  width: 640
+  height: 480
+  fx: 382.613
+  fy: 382.613
+  cx: 321.245
+  cy: 238.894
+  depth_scale: 0.001             # 16-bit depth → metres
+  depth_trunc: 4.0               # max depth in metres
+
+# --- RGB-D SLAM ---
+slam:
+  voxel_size: 0.01               # TSDF voxel size (metres) - lowered for higher resolution
+  sdf_trunc: 0.04                # TSDF truncation distance
+  max_depth: 4.0                 # ignore depth beyond this
+  min_depth: 0.1                 # ignore depth closer than this
+  keyframe_interval: 5           # every Nth frame is a keyframe
+  odometry_method: "hybrid"      # hybrid | color | point_to_plane
+  loop_closure:
+    enabled: true
+    search_interval: 30          # check for loops every N keyframes
+    distance_threshold: 0.15     # fitness threshold for loop acceptance
+  use_wheel_odom_prior: false    # initialise odometry from wheel odom
+
+  # --- 2D LiDAR fusion ---
+  lidar:
+    enabled: true                  # fuse LiDAR scan-matching into pose graph
+    icp_max_distance: 0.5          # ICP max correspondence distance (metres)
+    icp_fitness_threshold: 0.3     # min fitness to accept a scan match
+    weight: 1.0                    # relative weight vs. visual odometry edges
+
+  # --- 2D occupancy grid ---
+  occupancy_grid:
+    enabled: true                  # generate 2D map from LiDAR
+    resolution: 0.05               # metres per pixel
+    map_size: 30.0                 # map side length in metres
+    occupied_threshold: 0.7
+    free_threshold: 0.3
+
+# --- Evaluation ---
+evaluation:
+  align_trajectories: true       # Umeyama alignment before ATE
+  plot: true

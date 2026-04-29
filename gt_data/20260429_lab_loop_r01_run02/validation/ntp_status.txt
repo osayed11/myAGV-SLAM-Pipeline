@@ -1,0 +1,5 @@
+$ chronyc tracking
+Command not available: [Errno 2] No such file or directory
+
+$ chronyc sources -v
+Command not available: [Errno 2] No such file or directory

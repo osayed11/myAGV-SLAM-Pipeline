@@ -1,0 +1,21 @@
+created_local_time: 2026-04-29T15:41:07+0100
+created_unix_time: 1777473667.502785
+notes: mocap-only capture; robot recorded locally
+operator: adria
+raw_bag: raw/mocap.bag
+robot_id: mocap
+ros_master_uri: http://localhost:11311
+run_id: 20260429_lab_loop_r01_run02
+scenario: mocap_only
+topics:
+- /tf
+- /tf_static
+- /phasespace/rigids
+- /phasespace/markers
+- /phasespace/cameras
+- /phasespace/errors
+- /gt/robot_01/pose
+- /gt/robot_01/odom
+- /gt/robot_01/path
+- /gt/robot_01/status
+- /mocap_debug/status

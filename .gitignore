@@ -1,0 +1,21 @@
+# Virtual Environment
+venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Dataset large binaries
+*.bag
+robot_data/*.bag
+gt_data/**/*.bag
+
+# Keep directory structure, ignore nested data dumps
+robot_data/extracted_data/*
+!robot_data/extracted_data/.gitkeep
+
+slam_output/*
+!slam_output/.gitkeep
+
+# System junk
+.DS_Store
