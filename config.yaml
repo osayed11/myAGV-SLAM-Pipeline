@@ -45,6 +45,7 @@ slam:
   min_depth: 0.1                 # ignore depth closer than this
   keyframe_interval: 5           # every Nth frame is a keyframe
   odometry_method: "hybrid"      # hybrid | color | point_to_plane
+  optimizer: "gbp"              # lm | gbp | admm
   loop_closure:
     enabled: true
     search_interval: 30          # check for loops every N keyframes

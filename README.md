@@ -11,6 +11,8 @@ SLAM/
 ├── evaluate.py                 # Trajectory evaluation suite (ATE/RPE metrics)
 ├── run_orbslam.sh              # Execution wrapper for monocular ORB-SLAM2
 ├── slam_pipeline.py            # Open3D Multi-Sensor SLAM pipeline
+├── gbp_optimizer.py            # Gaussian Belief Propagation solver
+├── admm_optimizer.py           # Distributed Consensus ADMM solver
 │
 ├── gt_data/
 │   └── <sequence_name>/raw/
@@ -53,18 +55,30 @@ cd COMP0222-249_25-26_ORB_SLAM2
 ### 1. Data Extraction (`extract_bag.py`)
 Extracts topics out of ROS logs. Configure defaults directly inside `config.yaml`.
 
+**Extracting Robot Data:**
 ```bash
-python3 extract_bag.py [options]
+python3 extract_bag.py --bag robot_data/<dataset_name>.bag
+```
+
+**Extracting Ground Truth (MoCap) Data Independently:**
+```bash
+python3 extract_bag.py --bag gt_data/<sequence_name>/raw/mocap.bag --mocap-only
 ```
 
 * `--bag PATH` : Override target source `.bag`.
 * `--config PATH` : Pass tailored variables (Default: `config.yaml`).
 * `--output DIR` : Redirect generated assets appropriately.
+* `--mocap-only` : Skips RGB/Depth/LiDAR extraction and processes only the ground truth pose, dropping it directly next to the source bag.
 
 ### 2. Executing SLAM Pipelines
 
 #### Option A: Multi-Sensor SLAM (`slam_pipeline.py`)
-Fuses depth visuals, laser rangefinders, and dead-reckoning priors.
+Fuses depth visuals, laser rangefinders, and dead-reckoning priors. 
+
+You can dynamically swap the global optimizer by changing `optimizer: "admm"` in `config.yaml`:
+* `"lm"`: Open3D Centralized Levenberg-Marquardt
+* `"gbp"`: Gaussian Belief Propagation (Decentralized message passing)
+* `"admm"`: Consensus ADMM (Multi-robot trajectory splitting)
 
 ```bash
 python3 slam_pipeline.py [options]

@@ -469,24 +469,39 @@ def build_pose_graph(pairs, intrinsic, cfg, odom_dict=None,
 
 
 def optimise_pose_graph(pose_graph, cfg):
-    """Global pose graph optimisation."""
-    print("\n  Optimising pose graph...")
+    """Modular global pose graph optimisation."""
+    
+    opt_type = cfg["slam"].get("optimizer", "lm").lower()
+    
+    if opt_type == "admm":
+        print("\n  Optimising pose graph (Distributed Consensus ADMM)...")
+        from admm_optimizer import optimise_pose_graph_admm
+        pose_graph = optimise_pose_graph_admm(pose_graph, num_iterations=15, rho=1.0)
+        print("  ✓  Pose graph optimised via ADMM")
+        
+    elif opt_type == "gbp":
+        print("\n  Optimising pose graph (Gaussian Belief Propagation)...")
+        from gbp_optimizer import optimise_pose_graph_gbp
+        pose_graph = optimise_pose_graph_gbp(pose_graph, num_iterations=15)
+        print("  ✓  Pose graph optimised via GBP")
+        
+    else:
+        # Default Open3D Levenberg-Marquardt (Centralized)
+        print("\n  Optimising pose graph (Open3D Levenberg-Marquardt)...")
+        option = o3d.pipelines.registration.GlobalOptimizationOption(
+            max_correspondence_distance=0.05,
+            edge_prune_threshold=0.25,
+            preference_loop_closure=2.0,
+            reference_node=0,
+        )
+        o3d.pipelines.registration.global_optimization(
+            pose_graph,
+            o3d.pipelines.registration.GlobalOptimizationLevenbergMarquardt(),
+            o3d.pipelines.registration.GlobalOptimizationConvergenceCriteria(),
+            option,
+        )
+        print("  ✓  Pose graph optimised via LM")
 
-    option = o3d.pipelines.registration.GlobalOptimizationOption(
-        max_correspondence_distance=0.05,
-        edge_prune_threshold=0.25,
-        preference_loop_closure=2.0,
-        reference_node=0,
-    )
-
-    o3d.pipelines.registration.global_optimization(
-        pose_graph,
-        o3d.pipelines.registration.GlobalOptimizationLevenbergMarquardt(),
-        o3d.pipelines.registration.GlobalOptimizationConvergenceCriteria(),
-        option,
-    )
-
-    print("  ✓  Pose graph optimised")
     return pose_graph
 
 

@@ -1,0 +1,6 @@
+topic,type,count,frequency_hz,first_stamp,last_stamp,zero_header_stamps,non_monotonic
+/gt/robot_01/status,std_msgs/String,75,0.999493,1777556489.709085226,1777556563.765707970,0,0
+/mocap_debug/status,std_msgs/String,77,0.999946,1777556487.814831257,1777556563.813926935,0,0
+/phasespace/cameras,phasespace_msgs/Cameras,46,0.972790,1777556489.642318249,1777556562.061228037,0,0
+/phasespace/markers,phasespace_msgs/Markers,70899,1009.945582,1777556489.705049992,1777556564.027487755,0,0
+/tf_static,tf2_msgs/TFMessage,2611,28244.471380,1777556489.921159029,1777556562.064799786,0,0

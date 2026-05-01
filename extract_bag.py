@@ -164,24 +164,77 @@ def extract_odom(reader, typestore, topic, output_path):
 
 
 def extract_mocap(reader, typestore, topic, output_path):
-    """Extract MoCap poses to TUM format.  Handles PoseStamped and Odometry."""
+    """Extract MoCap poses to TUM format. Handles PoseStamped, Odometry, and tf."""
     connections = [c for c in reader.connections if c.topic == topic]
+    
+    # Try finding an Odometry or PoseStamped topic
     if not connections:
-        print(f"  ⚠  Topic '{topic}' not found — skipping MoCap ground truth.")
-        return 0
-
-    msgtype = connections[0].msgtype
-    lines = []
-    for _, timestamp, rawdata in reader.messages(connections=connections):
-        msg = typestore.deserialize_ros1(rawdata, msgtype)
-        # Handle both PoseStamped and Odometry message types
-        if hasattr(msg, "pose") and hasattr(msg.pose, "pose"):
-            pose = msg.pose.pose  # nav_msgs/Odometry
-        elif hasattr(msg, "pose") and hasattr(msg.pose, "position"):
-            pose = msg.pose  # geometry_msgs/PoseStamped
+        for c in reader.connections:
+            if c.msgtype in ["nav_msgs/msg/Odometry", "geometry_msgs/msg/PoseStamped", "nav_msgs/Odometry", "geometry_msgs/PoseStamped"]:
+                connections = [c]
+                print(f"  → Using fallback topic for MoCap: {c.topic}")
+                break
+                
+    # Fallback to tf / tf_static
+    tf_connections = []
+    if not connections:
+        for c in reader.connections:
+            if c.topic in ["/tf", "/tf_static"]:
+                tf_connections.append(c)
+                
+        if tf_connections:
+            print(f"  → Using TF topic for MoCap")
         else:
-            continue
-        lines.append(tum_line(timestamp, pose.position, pose.orientation))
+            print(f"  ⚠  Topic '{topic}' (or alternatives/tf) not found — skipping MoCap ground truth.")
+            return 0
+
+    lines = []
+    
+    if connections:
+        msgtype = connections[0].msgtype
+        for _, timestamp, rawdata in reader.messages(connections=connections):
+            msg = typestore.deserialize_ros1(rawdata, msgtype)
+            # Handle both PoseStamped and Odometry message types
+            if hasattr(msg, "pose") and hasattr(msg.pose, "pose"):
+                pose = msg.pose.pose  # nav_msgs/Odometry
+            elif hasattr(msg, "pose") and hasattr(msg.pose, "position"):
+                pose = msg.pose  # geometry_msgs/PoseStamped
+            else:
+                continue
+            lines.append(tum_line(timestamp, pose.position, pose.orientation))
+            
+    elif tf_connections:
+        # We need to determine the right msgtype for TF
+        msgtype = tf_connections[0].msgtype
+        if 'tf2_msgs' not in msgtype and 'tf' not in msgtype.lower():
+            # Sometimes it's registered differently, try to force it
+            msgtype = 'tf2_msgs/msg/TFMessage' if 'tf2' in msgtype else 'tf/tfMessage'
+            
+        for conn, timestamp, rawdata in reader.messages(connections=tf_connections):
+            # Fallbacks for TF message types since ROS1 bag reading of TF can be tricky
+            try:
+                msg = typestore.deserialize_ros1(rawdata, conn.msgtype)
+            except:
+                try:
+                    msg = typestore.deserialize_ros1(rawdata, 'tf2_msgs/TFMessage')
+                except:
+                    try:
+                        msg = typestore.deserialize_ros1(rawdata, 'tf/tfMessage')
+                    except Exception as e:
+                        continue
+                        
+            if hasattr(msg, 'transforms'):
+                for transform in msg.transforms:
+                    # We usually want the base_link / robot pose relative to map / mocap_world
+                    # We'll just take the first transform that looks like a robot pose if not specified
+                    if 'world' in transform.header.frame_id.lower() or 'map' in transform.header.frame_id.lower() or 'mocap' in transform.header.frame_id.lower():
+                        t = transform.transform.translation
+                        r = transform.transform.rotation
+                        # Use the transform's timestamp, not the message receive time, if available
+                        ts_to_use = timestamp
+                        if hasattr(transform.header, 'stamp'):
+                            ts_to_use = transform.header.stamp.sec * 1e9 + transform.header.stamp.nanosec
+                        lines.append(tum_line(ts_to_use, t, r))
 
     if lines:
         with open(output_path, "w") as f:
@@ -322,6 +375,7 @@ def main():
     parser.add_argument("--bag", type=str, help="Path to .bag file (overrides config)")
     parser.add_argument("--config", type=str, default="config.yaml", help="Config file")
     parser.add_argument("--output", type=str, help="Output directory (overrides config)")
+    parser.add_argument("--mocap-only", action="store_true", help="Only extract mocap data from the given bag")
     args = parser.parse_args()
 
     # Load config
@@ -359,69 +413,71 @@ def main():
         print(f"  Topics   : {len(reader.connections)}")
         print(f"  Messages : {reader.message_count}\n")
 
-        # 1. Camera intrinsics
-        print("[1/7] Camera intrinsics...")
-        intrinsics = extract_camera_info(reader, typestore, topics["camera_info"])
-        if intrinsics:
-            out_path = os.path.join(output_dir, "camera_intrinsics.json")
+        intrinsics, rgb_list, depth_list, n_associations, n_odom, n_lidar, n_imu = None, [], [], 0, 0, 0, 0
+        
+        if not args.mocap_only:
+            # 1. Camera intrinsics
+            print("[1/7] Camera intrinsics...")
+            intrinsics = extract_camera_info(reader, typestore, topics["camera_info"])
+            if intrinsics:
+                out_path = os.path.join(output_dir, "camera_intrinsics.json")
+                os.makedirs(output_dir, exist_ok=True)
+                with open(out_path, "w") as f:
+                    json.dump(intrinsics, f, indent=2)
+                print(f"  ✓  Saved intrinsics → {out_path}")
+            else:
+                # Use defaults from config
+                cam = cfg["camera"]
+                intrinsics = {
+                    "width": cam["width"], "height": cam["height"],
+                    "fx": cam["fx"], "fy": cam["fy"],
+                    "cx": cam["cx"], "cy": cam["cy"],
+                    "D": [], "distortion_model": "none",
+                }
+                out_path = os.path.join(output_dir, "camera_intrinsics.json")
+                os.makedirs(output_dir, exist_ok=True)
+                with open(out_path, "w") as f:
+                    json.dump(intrinsics, f, indent=2)
+                print(f"  ✓  Saved default intrinsics → {out_path}")
+
+            # 2. RGB images
+            print("\n[2/7] RGB images...")
+            rgb_list = extract_images(
+                reader, typestore, topics["rgb"],
+                os.path.join(output_dir, "rgb"), fmt, skip, "RGB frames"
+            )
+
+            # 3. Depth images
+            print("\n[3/7] Depth images...")
+            depth_list = extract_images(
+                reader, typestore, topics["depth"],
+                os.path.join(output_dir, "depth"), "png", skip, "Depth frames"
+            )
+
+            # 4. Associations
+            print("\n[4/7] Associating RGB-Depth pairs...")
+            associations = associate_rgb_depth(rgb_list, depth_list, max_diff)
+            assoc_path = os.path.join(output_dir, "associations.txt")
             os.makedirs(output_dir, exist_ok=True)
-            with open(out_path, "w") as f:
-                json.dump(intrinsics, f, indent=2)
-            print(f"  ✓  Saved intrinsics → {out_path}")
-        else:
-            # Use defaults from config
-            cam = cfg["camera"]
-            intrinsics = {
-                "width": cam["width"], "height": cam["height"],
-                "fx": cam["fx"], "fy": cam["fy"],
-                "cx": cam["cx"], "cy": cam["cy"],
-                "D": [], "distortion_model": "none",
-            }
-            out_path = os.path.join(output_dir, "camera_intrinsics.json")
-            os.makedirs(output_dir, exist_ok=True)
-            with open(out_path, "w") as f:
-                json.dump(intrinsics, f, indent=2)
-            print(f"  ✓  Saved default intrinsics → {out_path}")
+            with open(assoc_path, "w") as f:
+                f.write("# rgb_timestamp rgb_file depth_timestamp depth_file\n")
+                for rgb_ts, rgb_f, d_ts, d_f in associations:
+                    f.write(f"{rgb_ts:.6f} rgb/{rgb_f} {d_ts:.6f} depth/{d_f}\n")
+            n_associations = len(associations)
+            print(f"  ✓  {n_associations} associated pairs → {assoc_path}")
 
-        # 2. RGB images
-        print("\n[2/7] RGB images...")
-        rgb_list = extract_images(
-            reader, typestore, topics["rgb"],
-            os.path.join(output_dir, "rgb"), fmt, skip, "RGB frames"
-        )
+            # 5. Odometry
+            print("\n[5/7] Odometry...")
+            n_odom = extract_odom(reader, typestore, topics["odom"],
+                                  os.path.join(output_dir, "odom.txt"))
 
-        # 3. Depth images
-        print("\n[3/7] Depth images...")
-        depth_list = extract_images(
-            reader, typestore, topics["depth"],
-            os.path.join(output_dir, "depth"), "png", skip, "Depth frames"
-        )
-
-        # 4. Associations
-        print("\n[4/7] Associating RGB-Depth pairs...")
-        n_associations = 0
-        associations = associate_rgb_depth(rgb_list, depth_list, max_diff)
-        assoc_path = os.path.join(output_dir, "associations.txt")
-        os.makedirs(output_dir, exist_ok=True)
-        with open(assoc_path, "w") as f:
-            f.write("# rgb_timestamp rgb_file depth_timestamp depth_file\n")
-            for rgb_ts, rgb_f, d_ts, d_f in associations:
-                f.write(f"{rgb_ts:.6f} rgb/{rgb_f} {d_ts:.6f} depth/{d_f}\n")
-        n_associations = len(associations)
-        print(f"  ✓  {n_associations} associated pairs → {assoc_path}")
-
-        # 5. Odometry
-        print("\n[5/7] Odometry...")
-        n_odom = extract_odom(reader, typestore, topics["odom"],
-                              os.path.join(output_dir, "odom.txt"))
-
-        # 6. LiDAR
-        print("\n[6/7] LiDAR scans...")
-        n_lidar = extract_lidar(reader, typestore, topics["lidar"],
-                                os.path.join(output_dir, "lidar"))
+            # 6. LiDAR
+            print("\n[6/7] LiDAR scans...")
+            n_lidar = extract_lidar(reader, typestore, topics["lidar"],
+                                    os.path.join(output_dir, "lidar"))
 
         # 7. MoCap ground truth
-        mocap_bag = cfg.get("mocap_bag_file", "")
+        mocap_bag = args.bag if args.mocap_only else cfg.get("mocap_bag_file", "")
         if mocap_bag and os.path.isfile(mocap_bag):
             print(f"\n[7/7] MoCap ground truth (from separate bag)...")
             mocap_out_path = os.path.join(os.path.dirname(mocap_bag), "mocap.txt")
@@ -433,10 +489,11 @@ def main():
             n_mocap = extract_mocap(reader, typestore, topics["mocap"],
                                     os.path.join(output_dir, "mocap.txt"))
 
-        # Optional: IMU
-        print("\n[+] IMU data...")
-        n_imu = extract_imu(reader, typestore, topics["imu"],
-                            os.path.join(output_dir, "imu.csv"))
+        if not args.mocap_only:
+            # Optional: IMU
+            print("\n[+] IMU data...")
+            n_imu = extract_imu(reader, typestore, topics["imu"],
+                                os.path.join(output_dir, "imu.csv"))
 
     # -----------------------------------------------------------------------
     # Summary report
@@ -460,13 +517,16 @@ def main():
         print(f"  {name:22s} {status}")
 
     # Critical warnings
-    if not rgb_list or not depth_list or not n_associations:
+    if not args.mocap_only and (not rgb_list or not depth_list or not n_associations):
         print(f"\n  ✗  CRITICAL: RGB-D data is incomplete — SLAM cannot run!")
         print(f"     Check that your bag contains the configured topics:")
         print(f"       RGB:   {topics['rgb']}")
         print(f"       Depth: {topics['depth']}")
     else:
-        print(f"\n  ✓  Extraction complete!  →  {output_dir}/")
+        if args.mocap_only:
+            print(f"\n  ✓  MoCap Extraction complete!  →  {os.path.dirname(args.bag)}/")
+        else:
+            print(f"\n  ✓  Extraction complete!  →  {output_dir}/")
         if not n_odom:
             print(f"     Note: No odometry — SLAM will rely on visual odometry only.")
         if not n_mocap:
