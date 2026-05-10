@@ -80,13 +80,21 @@ You can dynamically swap the global optimizer by changing `optimizer: "admm"` in
 * `"gbp"`: Gaussian Belief Propagation (Decentralized message passing)
 * `"admm"`: Consensus ADMM (Multi-robot trajectory splitting)
 
+**Single Robot Run:**
 ```bash
-python3 slam_pipeline.py [options]
+python3 slam_pipeline.py --data robot_data/extracted_data/<dataset_name>/ --no-vis
+```
+Outputs will include `robot0_trajectory.txt` and the map artifacts (`joint_reconstruction.ply`, `joint_occupancy_grid.png`).
+
+**Multi-Robot Distributed Run:**
+Pass multiple data directories to trigger a joint factor-graph optimization (perfect for GBP/ADMM validation). The pipeline automatically handles inter-robot visual loop closures and generates unified outputs:
+```bash
+python3 slam_pipeline.py --data robot_data/extracted_data/robot_A/ robot_data/extracted_data/robot_B/ --no-vis
 ```
 
-* `--data DIR` : Path mapping to isolated sensor extractions.
+* `--data DIR1 [DIR2 ...]` : Paths to one or more isolated sensor extractions.
 * `--config PATH` : Node setup mapping parameters.
-* `--output DIR` : Save output summaries.
+* `--output DIR` : Directory to save outputs. Generates individual separated trajectories (`robot0_trajectory.txt`, `robot1_trajectory.txt`, etc.) alongside unified global maps (`joint_occupancy_grid.png`, `joint_reconstruction.ply`).
 * `--no-vis` : Bypasses Open3D pointcloud GUIs automatically.
 
 #### Option B: Monocular ORB-SLAM2

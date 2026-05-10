@@ -449,13 +449,25 @@ def build_pose_graph(pairs, intrinsic, cfg, odom_dict=None,
 
         for i in tqdm(range(0, n_kf, search_interval), desc="  Loop closure", unit="check"):
             for j in range(0, i - search_interval, search_interval):
+                # Use current pose graph estimates for initial guess
+                pose_i = pose_graph.nodes[i].pose
+                pose_j = pose_graph.nodes[j].pose
+                
+                # Relative pose from i to j
+                init_trans = np.linalg.inv(pose_i) @ pose_j
+                
+                # Only try dense alignment if they are spatially close
+                t_norm = np.linalg.norm(init_trans[:3, 3])
+                if t_norm > 3.0: # relaxed threshold for odometry drift
+                    continue
+                    
                 success, trans, info = compute_pairwise_odometry(
-                    kf_rgbds[i], kf_rgbds[j], intrinsic, cfg
+                    kf_rgbds[i], kf_rgbds[j], intrinsic, cfg, init_transform=init_trans
                 )
+                
                 if success:
-                    # Check transform magnitude (translation norm)
-                    t_norm = np.linalg.norm(trans[:3, 3])
-                    if t_norm < 5.0:  # sanity: not too far
+                    # Final check on transform magnitude
+                    if np.linalg.norm(trans[:3, 3]) < 5.0:
                         pose_graph.edges.append(
                             o3d.pipelines.registration.PoseGraphEdge(
                                 i, j, trans, info, uncertain=True
@@ -595,16 +607,16 @@ def save_results(mesh, pcd, pose_graph, kf_timestamps, output_dir):
 # 2D Occupancy grid
 # ---------------------------------------------------------------------------
 
-def generate_occupancy_grid(lidar_scans, lidar_meta, pose_graph,
-                            kf_timestamps, cfg, output_dir):
-    """Generate a 2D occupancy grid map from LiDAR scans using optimised poses.
-
-    Uses log-odds Bresenham ray-casting to mark free and occupied cells.
-    """
+def generate_occupancy_grid(all_lidar_scans, all_lidar_meta, pose_graph,
+                            all_kf_timestamps, cfg, output_dir):
+    """Generate a joint 2D occupancy grid map from all LiDAR scans using optimised poses."""
     grid_cfg = cfg["slam"].get("occupancy_grid", {})
     if not grid_cfg.get("enabled", False):
         return
-    if not lidar_scans or not lidar_meta:
+        
+    # Find the first valid meta to use for dimensions
+    valid_meta = next((m for m in all_lidar_meta if m is not None), None)
+    if not valid_meta:
         print("  ⚠  No LiDAR data — skipping occupancy grid.")
         return
 
@@ -621,57 +633,66 @@ def generate_occupancy_grid(lidar_scans, lidar_meta, pose_graph,
     l_occ = np.log(0.9 / 0.1)   # log-odds for occupied
     l_free = np.log(0.3 / 0.7)  # log-odds for free
 
-    print(f"\n  Generating 2D occupancy grid ({grid_dim}×{grid_dim}, "
+    print(f"\n  Generating Joint 2D occupancy grid ({grid_dim}×{grid_dim}, "
           f"res={resolution}m)...")
 
-    angle_min = lidar_meta["angle_min"]
-    angle_inc = lidar_meta["angle_increment"]
-    r_min = lidar_meta["range_min"]
-    r_max = lidar_meta["range_max"]
-
     n_integrated = 0
-    for node_idx, ts in enumerate(kf_timestamps):
-        if node_idx >= len(pose_graph.nodes):
-            break
+    node_offset = 0
 
-        scan_idx = get_nearest_scan(lidar_scans, ts)
-        if scan_idx is None:
+    for robot_idx in range(len(all_lidar_scans)):
+        lidar_scans = all_lidar_scans[robot_idx]
+        lidar_meta = all_lidar_meta[robot_idx]
+        kf_timestamps = all_kf_timestamps[robot_idx]
+        
+        if not lidar_scans or not lidar_meta:
+            node_offset += len(kf_timestamps)
             continue
+            
+        angle_min = lidar_meta["angle_min"]
+        angle_inc = lidar_meta["angle_increment"]
+        r_min = lidar_meta["range_min"]
+        r_max = lidar_meta["range_max"]
 
-        _, ranges = lidar_scans[scan_idx]
-        pose = pose_graph.nodes[node_idx].pose
+        for local_idx, ts in enumerate(kf_timestamps):
+            global_node_idx = node_offset + local_idx
+            if global_node_idx >= len(pose_graph.nodes):
+                break
 
-        # Robot position in grid coords
-        # Camera frame: ground plane is X and Z (Y is down/height)
-        rx = pose[0, 3] / resolution + origin
-        ry = pose[2, 3] / resolution + origin
-        # Yaw is rotation around the camera's Y-axis
-        yaw = np.arctan2(pose[0, 2], pose[0, 0])
-
-        angles = angle_min + np.arange(len(ranges)) * angle_inc
-
-        for j in range(len(ranges)):
-            r = ranges[j]
-            if not np.isfinite(r) or r < r_min or r > r_max:
+            scan_idx = get_nearest_scan(lidar_scans, ts)
+            if scan_idx is None:
                 continue
 
-            # Endpoint in world frame
-            beam_angle = yaw + angles[j]
-            ex = rx + (r / resolution) * np.cos(beam_angle)
-            ey = ry + (r / resolution) * np.sin(beam_angle)
+            _, ranges = lidar_scans[scan_idx]
+            pose = pose_graph.nodes[global_node_idx].pose
 
-            # Bresenham ray trace: mark cells along the ray as free
-            x0, y0 = int(round(rx)), int(round(ry))
-            x1, y1 = int(round(ex)), int(round(ey))
-            for bx, by in _bresenham(x0, y0, x1, y1):
-                if 0 <= bx < grid_dim and 0 <= by < grid_dim:
-                    log_odds[by, bx] += l_free
+            # Robot position in grid coords
+            rx = pose[0, 3] / resolution + origin
+            ry = pose[2, 3] / resolution + origin
+            yaw = np.arctan2(pose[0, 2], pose[0, 0])
 
-            # Mark endpoint as occupied
-            if 0 <= x1 < grid_dim and 0 <= y1 < grid_dim:
-                log_odds[y1, x1] += l_occ
+            angles = angle_min + np.arange(len(ranges)) * angle_inc
 
-        n_integrated += 1
+            for j in range(len(ranges)):
+                r = ranges[j]
+                if not np.isfinite(r) or r < r_min or r > r_max:
+                    continue
+
+                beam_angle = yaw + angles[j]
+                ex = rx + (r / resolution) * np.cos(beam_angle)
+                ey = ry + (r / resolution) * np.sin(beam_angle)
+
+                x0, y0 = int(round(rx)), int(round(ry))
+                x1, y1 = int(round(ex)), int(round(ey))
+                for bx, by in _bresenham(x0, y0, x1, y1):
+                    if 0 <= bx < grid_dim and 0 <= by < grid_dim:
+                        log_odds[by, bx] += l_free
+
+                if 0 <= x1 < grid_dim and 0 <= y1 < grid_dim:
+                    log_odds[y1, x1] += l_occ
+
+            n_integrated += 1
+            
+        node_offset += len(kf_timestamps)
 
     # Clamp log-odds
     log_odds = np.clip(log_odds, -10, 10)
@@ -685,7 +706,7 @@ def generate_occupancy_grid(lidar_scans, lidar_meta, pose_graph,
     grid_img[prob < free_thresh] = 255  # free
 
     os.makedirs(output_dir, exist_ok=True)
-    map_path = os.path.join(output_dir, "occupancy_grid.png")
+    map_path = os.path.join(output_dir, "joint_occupancy_grid.png")
     cv2.imwrite(map_path, grid_img)
 
     # Save map metadata (for navigation use)
@@ -699,10 +720,10 @@ def generate_occupancy_grid(lidar_scans, lidar_meta, pose_graph,
         "free_threshold": free_thresh,
         "scans_integrated": n_integrated,
     }
-    with open(os.path.join(output_dir, "occupancy_grid_meta.json"), "w") as f:
+    with open(os.path.join(output_dir, "joint_occupancy_grid_meta.json"), "w") as f:
         json.dump(map_meta, f, indent=2)
 
-    print(f"  ✓  Occupancy grid ({n_integrated} scans) → {map_path}")
+    print(f"  ✓  Joint occupancy grid ({n_integrated} scans) → {map_path}")
     return grid_img
 
 
@@ -769,7 +790,7 @@ def visualise_results(mesh, pcd, pose_graph):
 
 def main():
     parser = argparse.ArgumentParser(description="RGB-D SLAM Pipeline")
-    parser.add_argument("--data", type=str, help="Extracted data directory")
+    parser.add_argument("--data", type=str, nargs="+", help="One or more extracted data directories")
     parser.add_argument("--config", type=str, default="config.yaml")
     parser.add_argument("--output", type=str, default="slam_output")
     parser.add_argument("--no-vis", action="store_true", help="Skip visualisation")
@@ -778,83 +799,187 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    data_dir = args.data or cfg["extraction"]["output_dir"]
-    dataset_name = os.path.basename(os.path.normpath(data_dir))
-
-    if args.output == "slam_output" and dataset_name != "extracted_data":
-        output_dir = os.path.join(args.output, dataset_name)
-    else:
-        output_dir = args.output
-
+    data_dirs = args.data or [cfg["extraction"]["output_dir"]]
+    
     print(f"\n{'='*60}")
-    print(f"  RGB-D + LiDAR SLAM Pipeline (Open3D)")
+    print(f"  Multi-Robot RGB-D + LiDAR SLAM Pipeline")
     print(f"{'='*60}")
-    print(f"  Data   : {data_dir}")
-    print(f"  Output : {output_dir}")
+    print(f"  Robots : {len(data_dirs)}")
+    for d in data_dirs: print(f"    - {d}")
     print(f"{'='*60}\n")
 
     t0 = time.time()
+    
+    joint_pose_graph = o3d.pipelines.registration.PoseGraph()
+    all_kf_indices = []
+    all_kf_timestamps = []
+    all_pairs = []
+    all_lidar_scans = []
+    all_lidar_meta = []
+    
+    robot_offset = 0
 
-    # 1. Load data
-    print("[1/6] Loading data...")
-    intrinsic = load_intrinsics(data_dir, cfg)
-    pairs = load_associations(data_dir)
-    print(f"  Loaded {len(pairs)} RGB-D pairs")
+    # 1-3. Build local pose graphs for each robot
+    for robot_idx, data_dir in enumerate(data_dirs):
+        print(f"\n[Robot {robot_idx}] Loading and building local graph: {data_dir}")
+        intrinsic = load_intrinsics(data_dir, cfg)
+        pairs = load_associations(data_dir)
+        
+        odom_dict = None
+        if cfg["slam"].get("use_wheel_odom_prior", False):
+            odom_dict = load_wheel_odom(data_dir)
 
-    if len(pairs) < 2:
-        print("✗  Need at least 2 frames. Check extraction output.")
-        sys.exit(1)
+        lidar_scans, lidar_meta = [], None
+        if cfg["slam"].get("lidar", {}).get("enabled", False):
+            lidar_scans, lidar_meta = load_lidar_scans(data_dir)
+            
+        all_lidar_scans.append(lidar_scans)
+        all_lidar_meta.append(lidar_meta)
 
-    odom_dict = None
-    if cfg["slam"].get("use_wheel_odom_prior", False):
-        print("  Loading wheel odometry prior...")
-        odom_dict = load_wheel_odom(data_dir)
-        if odom_dict:
-            print(f"  ✓  {len(odom_dict)} odom poses loaded")
-        else:
-            print("  ℹ  Proceeding without wheel odom — using identity init for odometry.")
+        # Build local graph
+        local_graph, kf_indices, kf_ts = build_pose_graph(
+            pairs, intrinsic, cfg, odom_dict,
+            lidar_scans=lidar_scans, lidar_meta=lidar_meta
+        )
+        
+        # Merge into joint graph
+        # Offset the node indices for the edges
+        for edge in local_graph.edges:
+            edge.source_node_id += robot_offset
+            edge.target_node_id += robot_offset
+            joint_pose_graph.edges.append(edge)
+            
+        for node in local_graph.nodes:
+            joint_pose_graph.nodes.append(node)
+            
+        all_kf_indices.append(kf_indices)
+        all_kf_timestamps.append(kf_ts)
+        all_pairs.append(pairs)
+        
+        robot_offset += len(local_graph.nodes)
 
-    # Load LiDAR scans
-    lidar_scans, lidar_meta = [], None
-    lidar_cfg = cfg["slam"].get("lidar", {})
-    if lidar_cfg.get("enabled", False):
-        print("  Loading LiDAR scans...")
-        lidar_scans, lidar_meta = load_lidar_scans(data_dir)
+    # 4. Add Inter-Robot Loop Closures (Communication)
+    print("\n[4] Linking multi-robot trajectories...")
+    if len(data_dirs) > 1 and cfg["slam"].get("loop_closure", {}).get("enabled", True):
+        search_interval = cfg["slam"].get("loop_closure", {}).get("search_interval", 30)
+        depth_scale = cfg["camera"]["depth_scale"]
+        depth_trunc = cfg["slam"]["max_depth"]
+        n_inter_loops = 0
+        
+        # We assume all robots start at roughly the same global origin
+        for r1 in range(len(data_dirs)):
+            for r2 in range(r1 + 1, len(data_dirs)):
+                print(f"  Detecting cross-robot loop closures between Robot {r1} and Robot {r2}...")
+                
+                # Get node offsets for each robot
+                offset1 = sum(len(all_kf_indices[k]) for k in range(r1))
+                offset2 = sum(len(all_kf_indices[k]) for k in range(r2))
+                
+                kf_indices_1 = all_kf_indices[r1]
+                kf_indices_2 = all_kf_indices[r2]
+                
+                # Determine standard intrinsic to use for cross-robot checks
+                intrinsic = load_intrinsics(data_dirs[r1], cfg) 
+                
+                for i in tqdm(range(0, len(kf_indices_1), search_interval), desc="  Cross-robot", unit="check"):
+                    for j in range(0, len(kf_indices_2), search_interval):
+                        node_i = offset1 + i
+                        node_j = offset2 + j
+                        
+                        pose_i = joint_pose_graph.nodes[node_i].pose
+                        pose_j = joint_pose_graph.nodes[node_j].pose
+                        
+                        # Initial guess assumes robots share the same global origin
+                        init_trans = np.linalg.inv(pose_i) @ pose_j
+                        
+                        # Only try dense alignment if they are spatially close in the assumed global frame
+                        t_norm = np.linalg.norm(init_trans[:3, 3])
+                        if t_norm > 3.0:
+                            continue
+                            
+                        # Load images on demand to avoid OOM
+                        rgb_p1, depth_p1, _ = all_pairs[r1][kf_indices_1[i]]
+                        rgb_p2, depth_p2, _ = all_pairs[r2][kf_indices_2[j]]
+                        
+                        try:
+                            rgbd1 = make_rgbd(rgb_p1, depth_p1, depth_scale, depth_trunc)
+                            rgbd2 = make_rgbd(rgb_p2, depth_p2, depth_scale, depth_trunc)
+                            
+                            success, trans, info = compute_pairwise_odometry(
+                                rgbd1, rgbd2, intrinsic, cfg, init_transform=init_trans
+                            )
+                            
+                            if success:
+                                if np.linalg.norm(trans[:3, 3]) < 5.0:
+                                    joint_pose_graph.edges.append(
+                                        o3d.pipelines.registration.PoseGraphEdge(
+                                            node_i, node_j, trans, info, uncertain=True
+                                        )
+                                    )
+                                    n_inter_loops += 1
+                        except Exception:
+                            continue
+                                
+        print(f"  ✓  Found {n_inter_loops} inter-robot loop closures")
 
-    # 2-3. Build pose graph (visual odometry + LiDAR ICP + loop closures)
-    print("\n[2/6] Building pose graph (RGB-D + LiDAR)...")
-    pose_graph, kf_indices, kf_timestamps = build_pose_graph(
-        pairs, intrinsic, cfg, odom_dict,
-        lidar_scans=lidar_scans, lidar_meta=lidar_meta
-    )
+    # 5. Global Optimisation (Joint Graph)
+    print("\n[5] Joint pose graph optimisation...")
+    joint_pose_graph = optimise_pose_graph(joint_pose_graph, cfg)
 
-    # 4. Optimise
-    print("\n[3/6] Pose graph optimisation...")
-    pose_graph = optimise_pose_graph(pose_graph, cfg)
+    # 6. TSDF integration (Joint)
+    print("\n[6] Joint dense reconstruction...")
+    # This will integrate all robots into one global volume
+    mesh = o3d.geometry.TriangleMesh()
+    pcd = o3d.geometry.PointCloud()
+    
+    node_offset = 0
+    for robot_idx in range(len(data_dirs)):
+        print(f"  Integrating Robot {robot_idx}...")
+        intrinsic = load_intrinsics(data_dirs[robot_idx], cfg)
+        robot_kf_indices = all_kf_indices[robot_idx]
+        
+        # Sub-graph for this robot
+        robot_nodes = joint_pose_graph.nodes[node_offset : node_offset + len(robot_kf_indices)]
+        
+        # Create a temp pose graph for this robot's integration
+        temp_graph = o3d.pipelines.registration.PoseGraph()
+        temp_graph.nodes = robot_nodes
+        
+        r_mesh, r_pcd = integrate_tsdf(all_pairs[robot_idx], robot_kf_indices, temp_graph, intrinsic, cfg)
+        mesh += r_mesh
+        pcd += r_pcd
+        
+        node_offset += len(robot_kf_indices)
 
-    # 5. TSDF integration
-    print("\n[4/6] Dense reconstruction...")
-    mesh, pcd = integrate_tsdf(pairs, kf_indices, pose_graph, intrinsic, cfg)
-
-    # 6. 2D occupancy grid from LiDAR
-    print("\n[5/6] 2D occupancy grid...")
-    generate_occupancy_grid(
-        lidar_scans, lidar_meta, pose_graph,
-        kf_timestamps, cfg, output_dir
-    )
-
-    # 7. Save
-    print("\n[6/6] Saving results...")
-    save_results(mesh, pcd, pose_graph, kf_timestamps, output_dir)
+    # 7. 2D occupancy grid from LiDAR (Joint)
+    print("\n[7] Joint 2D occupancy grid...")
+    output_dir = args.output
+    generate_occupancy_grid(all_lidar_scans, all_lidar_meta, joint_pose_graph, all_kf_timestamps, cfg, output_dir)
+    
+    # 8. Save
+    print("\n[8] Saving joint results...")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Save trajectory for each robot individually
+    node_offset = 0
+    for robot_idx in range(len(data_dirs)):
+        r_timestamps = all_kf_timestamps[robot_idx]
+        robot_nodes = joint_pose_graph.nodes[node_offset : node_offset + len(r_timestamps)]
+        temp_graph = o3d.pipelines.registration.PoseGraph()
+        temp_graph.nodes = robot_nodes
+        save_trajectory(temp_graph, r_timestamps, os.path.join(output_dir, f"robot{robot_idx}_trajectory.txt"))
+        node_offset += len(r_timestamps)
+    
+    o3d.io.write_triangle_mesh(os.path.join(output_dir, "joint_reconstruction.ply"), mesh)
+    o3d.io.write_point_cloud(os.path.join(output_dir, "joint_pointcloud.ply"), pcd)
 
     elapsed = time.time() - t0
     print(f"\n{'='*60}")
-    print(f"  ✓  SLAM complete in {elapsed:.1f}s")
+    print(f"  ✓  Multi-Robot SLAM complete in {elapsed:.1f}s")
     print(f"{'='*60}\n")
 
-    # Optional visualisation
     if not args.no_vis:
-        visualise_results(mesh, pcd, pose_graph)
+        visualise_results(mesh, pcd, joint_pose_graph)
 
 
 if __name__ == "__main__":

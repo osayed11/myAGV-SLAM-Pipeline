@@ -3,7 +3,7 @@
 # ============================================================
 
 # --- Bag file ---
-bag_file: "robot_data/agv1_square_manual_20260429_224111.bag"   # path relative to SLAM/ dir
+bag_file: "robot_data/robotA_scenario1_square_pass1.bag"   # path relative to SLAM/ dir
 mocap_bag_file: "gt_data/20260429_lab_loop_r01_run02/raw/mocap.bag"
 
 # --- ROS Topics ---
@@ -43,14 +43,14 @@ slam:
   sdf_trunc: 0.04                # TSDF truncation distance
   max_depth: 4.0                 # ignore depth beyond this
   min_depth: 0.1                 # ignore depth closer than this
-  keyframe_interval: 5           # every Nth frame is a keyframe
+  keyframe_interval: 2           # Increased density (every 2nd frame)
   odometry_method: "hybrid"      # hybrid | color | point_to_plane
-  optimizer: "gbp"              # lm | gbp | admm
+  optimizer: "lm"               # lm | gbp | admm
   loop_closure:
     enabled: true
-    search_interval: 30          # check for loops every N keyframes
+    search_interval: 10          # Check more frequently
     distance_threshold: 0.15     # fitness threshold for loop acceptance
-  use_wheel_odom_prior: false    # initialise odometry from wheel odom
+  use_wheel_odom_prior: true    # USE THE WHEELS TO PREVENT EXPLOSIONS
 
   # --- 2D LiDAR fusion ---
   lidar:
